@@ -1,7 +1,6 @@
 #include "Arduino.h"
 #include "MidiController.h"
 #include <SoftwareSerial.h>
-#include <TimerOne.h>
 #include <MIDI.h>
 #include <midi_Defs.h>
 #include <midi_Message.h>
@@ -15,66 +14,106 @@ MidiController *instance;
 
 struct mySettings : public midi::DefaultSettings {
   static const bool UseRunningStatus = false;
+  static const bool Use1ByteParsing = true;
+  static const bool HandleNullVelocityNoteOnAsNoteOff = false;
 };
  
-SoftwareSerial softSerial(0,7);
+SoftwareSerial softSerial(8,7);
 MIDI_CREATE_CUSTOM_INSTANCE(SoftwareSerial, softSerial, midiOUT, mySettings);
 
-SoftwareSerial softINSerial(8,0);
-MIDI_CREATE_CUSTOM_INSTANCE(SoftwareSerial, softINSerial, midiIN, mySettings);
+SoftwareSerial softSerial2(1,12);
+MIDI_CREATE_CUSTOM_INSTANCE(SoftwareSerial, softSerial2, midiOUT2, mySettings);
 
-//
+MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial, midiIN, mySettings);
 
-static void handleClock() {
-  Serial.println("Received clock message.");
+// Temporary for debugging
+const int GREEN_LED_PIN = 5;
+const int BLUE_LED_PIN = 11;
+const int RED_LED_PIN = 6;
+void randomize() {
+  int sensorValue = random(1023);
+  int redValue = constrain(map(sensorValue, 0, 512, 255, 0), 0, 255);
+  int greenValue = constrain(map(sensorValue, 0, 512, 0, 255),0,255)-constrain(map(sensorValue, 512, 1023, 0, 255),0,255);
+  int blueValue = constrain(map(sensorValue, 512, 1023, 0, 255), 0, 255);
+  analogWrite(RED_LED_PIN, redValue/2);
+  analogWrite(GREEN_LED_PIN, greenValue/2);
+  analogWrite(BLUE_LED_PIN, blueValue/2);
 }
 
-static void handleTimerCallback() {
-  instance->Clock();
-  if (instance->timerCallback) {
-    instance->timerCallback();
+static void outByte(byte b) {
+  Serial.write(b);
+  softSerial2.write(b);
+  softSerial.write(b);
+}
+
+static void handleAllMessages(midi::MidiMessage msg) {
+  if (msg.type == midi::Start) {
+    outByte(msg.type);
+    instance->ResetTimer();
+    return;
+  }
+  if (msg.type == midi::Stop) {
+    outByte(msg.type);
+    return;
+  }
+
+  if (msg.type < 0xf0) {
+    randomize();
+    Serial.write(msg.type + msg.channel-1);
+    Serial.write(msg.data1);
+    softSerial2.write(msg.type + msg.channel-1);
+    softSerial2.write(msg.data1);
+    softSerial.write(msg.type + msg.channel-1);
+    softSerial.write(msg.data1);
+    if (msg.type <= 0xf0 || msg.data2) {
+      Serial.write(msg.data2);
+      softSerial2.write(msg.data2);
+      softSerial.write(msg.data2);
+    }
   }
 }
 
 static void handleSysex(byte *array, unsigned size) {
+  randomize();
   if (size < 5) return;
   if (!(array[1] == 0x7d && array[2] == 0x2a && array[3] == 0x4d)) return;
-  
-  Serial.print("Received sysex length ");
-  Serial.println(size);
 
   for (int i=4; i<size-1; i++) {
     int command = array[i];
-    Serial.print("Command received ");
-    Serial.println(command, HEX);
     if (command >= 0x40) {
       return;
     }
-    
+
     switch (command) {
     case 0: {
       byte response[] = {0xf0, 0x7d, 0x2a, 0x4d, 
         0x40, 0x01,            // RESPONSE 0x40, version 1
-        0x01, 0x01,            // 1 inport, 1 outport
+        0x01, 0x02,            // 1 inport, 2 outports
         byte(int(bpm) >> 7),   // current speet msb
         byte(int(bpm) & 0x7f), // current speed lsb
         0xf7};
+      midiIN.sendSysEx(sizeof(response), response, true);
       midiOUT.sendSysEx(sizeof(response), response, true);
-      break;
+      midiOUT2.sendSysEx(sizeof(response), response, true);
+      return;
     }
     case 1: {
       i += 7;
       break;
     }
     case 2: {
-      bpm = (array[i+1] << 7) + array[i+2];
-      Timer1.setPeriod(60000000.0/bpm/24.0);
-      i += 2;
+      int newbpm = (array[i+1] << 7) + array[i+2];
+      instance->SetBPM(newbpm);
+    }
+    case 3: {
+      instance->Start();
+      break;
+    }
+    case 4: {
+      instance->Stop(false);
       break;
     }
     default: {
-      Serial.print("Unsupported command: ");
-      Serial.println(command, HEX);
       break;
     }
     }
@@ -86,57 +125,77 @@ static void handleSysex(byte *array, unsigned size) {
 MidiController::MidiController() {}
 
 void MidiController::begin() {
-  Serial.println("MidiController begin"); 
   instance = this;
+
   midiOUT.begin();
   midiOUT.turnThruOff();
-  
-  midiIN.begin();
+
+  midiOUT2.begin();
+  midiOUT2.turnThruOff();
+
+  midiIN.begin(MIDI_CHANNEL_OMNI);
   midiIN.turnThruOff();
-  midiIN.setHandleClock(handleClock);
   midiIN.setHandleSystemExclusive(handleSysex);
+  midiIN.setHandleAllMessages(handleAllMessages);
 
   this->setupTimer();
 }
 
 void MidiController::loop() {
-  if (midiOUT.read()) {
-    Serial.println("Received type " + midiOUT.getType());
-  }
-  
-  if (midiIN.read()) {
-    int t = midiIN.getType();
-    if (!(t == midi::Clock || t == midi::ActiveSensing || t == midi::SystemReset || t == midi::SystemExclusive)) {
-      Serial.print("Received type ");
-      Serial.println(t, HEX);
+  unsigned long now = micros();
+  if (now >= _next) {
+    _next += _sleep;
+
+    Clock();
+    if (_timerCallback) {
+      _timerCallback();
     }
   }
+
+  midiOUT2.read();
+  midiOUT.read();
+  midiIN.read();
 }
 
 void MidiController::Start() {
+  midiIN.sendRealTime(midi::Start);
   midiOUT.sendRealTime(midi::Start);
-  this->setupTimer();
+  midiOUT2.sendRealTime(midi::Start);
+  this->ResetTimer();
 }
 
 void MidiController::Stop(bool hard) {
+  midiIN.sendRealTime(midi::Stop);
   midiOUT.sendRealTime(midi::Stop);
-  if (hard) {
-    Timer1.stop();
-  }
+  midiOUT2.sendRealTime(midi::Stop);
+//  if (hard) {
+//    Timer1.stop();
+//  }
 }
 
 void MidiController::Clock() {
+  midiIN.sendRealTime(midi::Clock);
   midiOUT.sendRealTime(midi::Clock);
+  midiOUT2.sendRealTime(midi::Clock);
 }
 
 void MidiController::TimerCallback(void (*fn)(void)) {
-  timerCallback = fn;
+  _timerCallback = fn;
+}
+
+void MidiController::SetBPM(float newbpm) {
+  bpm = newbpm;
+  setupTimer();
 }
 
 //
 
+void MidiController::ResetTimer() {
+    this->setupTimer();
+    _next = micros() - 1000;
+}
+
 void MidiController::setupTimer() {
-  Timer1.initialize(60000000.0/bpm/24.0);
-  Timer1.attachInterrupt(handleTimerCallback);
+  _sleep = 60000000.0/bpm/24.0;
 }
 

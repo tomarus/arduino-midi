@@ -13,9 +13,14 @@ class MidiController
     void Stop(bool hard);
     void Clock();
     void TimerCallback(void (*)());
-    void (*timerCallback)();
+    void SetBPM(float);
+    void ResetTimer();
   private:
     void setupTimer();
+
+    void (*_timerCallback)();
+    unsigned long _sleep;
+    unsigned long _next;
 };
 
 #endif

@@ -36,10 +36,10 @@ void timerCallback() {
 void setup() {
   midiController.begin();
   midiController.TimerCallback(timerCallback);
-  Serial.begin(115200);
+//  Serial.begin(115200);
   stopMode = 1;
   tick=-1;
-  Serial.println("Ready.");
+//  Serial.println("Ready.");
 }
 
 void loop() {
@@ -49,7 +49,7 @@ void loop() {
   if (digitalRead(START_BUTTON) == LOW) {
     startPressed++;
     if (startPressed == 1) {
-      Serial.println("Start button pressed.");
+//      Serial.println("Start button pressed.");
       midiController.Start();
       stopMode = 0;
       tick=-1;
@@ -62,7 +62,7 @@ void loop() {
     stopPressed++;
     if (stopPressed == 1) {
       if (stopMode == 0) {
-        Serial.println("Stop button pressed.");
+//        Serial.println("Stop button pressed.");
         midiController.Stop(false);
         stopMode = 1;
       } else if (stopMode == 1) {
@@ -73,6 +73,8 @@ void loop() {
   } else {
     stopPressed = 0;
   }
+
+  return;
 
   // handle potmeter
   int sensorValue = analogRead(POT_PIN);
